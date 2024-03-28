@@ -44,9 +44,12 @@ ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
 UART_HandleTypeDef hlpuart1;
+DMA_HandleTypeDef hdma_lpuart1_rx;
+DMA_HandleTypeDef hdma_lpuart1_tx;
 
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim5;
 
 /* USER CODE BEGIN PV */
 
@@ -69,6 +72,8 @@ uint16_t old_ADC = 0;
 //change_mode
 uint8_t mode = 1;  //mode1->motor control    mode2->faulhaber
 
+uint8_t get_Uart[2];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -79,10 +84,14 @@ static void MX_LPUART1_UART_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
+static void MX_TIM5_Init(void);
 /* USER CODE BEGIN PFP */
 float PlantSimulation(float VIn) ;
 void PWM_Mode1();
 void Read_setpoint_position_Mode1();
+
+//Received UART DMA
+void UARTDMAConfig();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -123,6 +132,7 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
+  MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
 
   //Read real_position, set_point with DMA
@@ -139,6 +149,12 @@ int main(void)
   HAL_TIM_Base_Start(&htim4);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
 
+  //Mode3 send UART to Matlab
+  HAL_TIM_Base_Start_IT(&htim5);
+
+  // Start UART in DMA mode
+  HAL_UART_Receive_DMA(&hlpuart1, get_Uart, 2);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -154,12 +170,18 @@ int main(void)
 		  //Delay 0.01 s
 		  timestamp = HAL_GetTick()+10;
 
-		  if(mode == 1){
+		  if(mode == 1){ //motor control 12V
+			  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
 			  Vfeedback = arm_pid_f32(&PID, setposition - position); //no more than 12V
 
 			  PWM_Mode1();
 			  Read_setpoint_position_Mode1();
-
+		  }
+		  else if(mode == 2){ //Fualhaber
+			  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+		  }
+		  else if(mode == 3){
+			  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 		  }
 
 	  }
@@ -442,6 +464,51 @@ static void MX_TIM4_Init(void)
 }
 
 /**
+  * @brief TIM5 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM5_Init(void)
+{
+
+  /* USER CODE BEGIN TIM5_Init 0 */
+
+  /* USER CODE END TIM5_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM5_Init 1 */
+
+  /* USER CODE END TIM5_Init 1 */
+  htim5.Instance = TIM5;
+  htim5.Init.Prescaler = 169;
+  htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim5.Init.Period = 4999;
+  htim5.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim5.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim5) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim5, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim5, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM5_Init 2 */
+
+  /* USER CODE END TIM5_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -455,6 +522,12 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
 
 }
 
@@ -511,6 +584,17 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	if(GPIO_Pin == GPIO_PIN_13)
+	{
+		mode += 1;
+		if(mode == 4){
+			mode = 1;
+		}
+	}
+}
+
 void PWM_Mode1(){ //Motor Control
 	//PWM to Motor Output Compare
 	duty_cycle = fabs(Vfeedback) * 100/12; //0->12V to 0->100%
@@ -538,6 +622,46 @@ void Read_setpoint_position_Mode1(){ //Motor Control
 
 	setposition = ADCBuffer[1]*2*3.14/4095; //4095 -> rad
 	position = (ADCBuffer[0] + 4095*n_round)*2*3.14/4095; //4095 -> rad //feedback from potentionmeter
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	if(htim == &htim5 && mode == 3)
+	{
+		  uint16_t number = ADCBuffer[0]; // Your 16-bit number
+		  uint8_t header = 69; // ASCII value for 'E'
+		  uint8_t terminator = '\n'; // Newline character
+
+		  // Split 16-bit number into two 8-bit parts
+		  uint8_t highByte = (number >> 8) & 0xFF;
+		  uint8_t lowByte = number & 0xFF;
+
+		  // Prepare buffer to hold header, two 8-bit parts, and terminator
+		  uint8_t buffer[5];
+		  buffer[0] = header;
+		  buffer[1] = highByte;
+		  buffer[2] = lowByte;
+		  buffer[3] = terminator;
+
+		  // Transmit data over UART
+		  HAL_UART_Transmit(&hlpuart1, buffer, sizeof(buffer), 10);
+//		  HAL_UART_Transmit_DMA(&hlpuart1, TxBuffer, strlen((char*) TxBuffer));
+	}
+}
+
+//Receive UART from simulink
+void UARTDMAConfig()
+{
+	//start UART in DMA Mode
+	HAL_UART_Receive_DMA(&hlpuart1, get_Uart, 2);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if(huart == &hlpuart1)
+	{
+
+	}
 }
 
 /* USER CODE END 4 */
