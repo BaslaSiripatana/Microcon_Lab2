@@ -49,13 +49,26 @@ TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 
 /* USER CODE BEGIN PV */
+
+//For Read Real_position, set_point
 uint16_t ADCBuffer[2];
 
 //PID
 arm_pid_instance_f32 PID = {0};
 float position =0;
-float setposition = 100;
+float setposition = 0;
 float Vfeedback = 0;
+
+//For create PWM
+float duty_cycle = 0;
+
+//count round to unwrap position
+int n_round = 0;
+uint16_t old_ADC = 0;
+
+//change_mode
+uint8_t mode = 1;  //mode1->motor control    mode2->faulhaber
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -68,6 +81,8 @@ static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 /* USER CODE BEGIN PFP */
 float PlantSimulation(float VIn) ;
+void PWM_Mode1();
+void Read_setpoint_position_Mode1();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -109,16 +124,21 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
+
+  //Read real_position, set_point with DMA
   HAL_ADC_Start_DMA(&hadc1, ADCBuffer, 2);
   HAL_TIM_Base_Start(&htim3);
 
-  PID.Kp =0.1;
-  PID.Ki =0.00001;
-  PID.Kd = 0.1;
+  //PID Control
+  PID.Kp = 1.9;
+  PID.Ki = 0;
+  PID.Kd = 0;
   arm_pid_init_f32(&PID, 0);
 
-  //Timer IT for Motor PlantSimulation
-  HAL_TIM_Base_Start_IT(&htim4);
+  //Output Compare for PWM Mode1
+  HAL_TIM_Base_Start(&htim4);
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -131,9 +151,17 @@ int main(void)
 	  static uint32_t timestamp =0;
 	  if(timestamp < HAL_GetTick())
 	  {
+		  //Delay 0.01 s
 		  timestamp = HAL_GetTick()+10;
-		  Vfeedback = arm_pid_f32(&PID, setposition - position);
-		  position = PlantSimulation(Vfeedback);
+
+		  if(mode == 1){
+			  Vfeedback = arm_pid_f32(&PID, setposition - position); //no more than 12V
+
+			  PWM_Mode1();
+			  Read_setpoint_position_Mode1();
+
+		  }
+
 	  }
   }
   /* USER CODE END 3 */
@@ -368,6 +396,7 @@ static void MX_TIM4_Init(void)
 
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
 
   /* USER CODE BEGIN TIM4_Init 1 */
 
@@ -387,15 +416,28 @@ static void MX_TIM4_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 500;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN TIM4_Init 2 */
 
   /* USER CODE END TIM4_Init 2 */
+  HAL_TIM_MspPostInit(&htim4);
 
 }
 
@@ -434,20 +476,30 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LD2_Pin|GPIO_PIN_8, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : B1_Pin */
-  GPIO_InitStruct.Pin = B1_Pin;
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
+  /*Configure GPIO pins : LD2_Pin PA8 */
+  GPIO_InitStruct.Pin = LD2_Pin|GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB10 */
+  GPIO_InitStruct.Pin = GPIO_PIN_10;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
@@ -458,25 +510,36 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-float PlantSimulation(float VIn) // run with fix frequency
-{
-	static float speed =0;
-	static float position =0;
-	float current= VIn - speed * 0.0123;
-	float torque = current * 0.456;
-	float acc = torque * 0.789;
-	speed += acc;
-	position += speed;
-	return position;
-}
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-	if(htim == &htim4)
-	{
-		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+void PWM_Mode1(){ //Motor Control
+	//PWM to Motor Output Compare
+	duty_cycle = fabs(Vfeedback) * 100/12; //0->12V to 0->100%
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, (int)((duty_cycle * 1000) / 100));
+
+	if(Vfeedback >= 0){   //Motor Rotate Forward (CW) Radiant Increase
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+	}
+	else{ //Motor Rotate Reverse Radiant decrease (CCW)
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
 	}
 }
+
+void Read_setpoint_position_Mode1(){ //Motor Control
+	//Unwrap Position
+	if((old_ADC -  ADCBuffer[0])>2048){
+		n_round += 1;
+	}
+	else if((old_ADC -  ADCBuffer[0])<-2048){
+		n_round -= 1;
+	}
+	old_ADC = ADCBuffer[0];
+
+	setposition = ADCBuffer[1]*2*3.14/4095; //4095 -> rad
+	position = (ADCBuffer[0] + 4095*n_round)*2*3.14/4095; //4095 -> rad //feedback from potentionmeter
+}
+
 /* USER CODE END 4 */
 
 /**
