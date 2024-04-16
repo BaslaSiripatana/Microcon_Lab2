@@ -195,9 +195,6 @@ int main(void)
 	  else if(mode == 3){
 		  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 	  }
-	  else if(mode == 4){
-		  //why are you here
-	  }
   }
   /* USER CODE END 3 */
 }
