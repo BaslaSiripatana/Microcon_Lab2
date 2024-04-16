@@ -14,6 +14,12 @@
   * If no LICENSE file comes with this software, it is provided AS-IS.
   *
   ******************************************************************************
+  ******************************************************************************
+  ******************************************************************************
+  TODO:
+  set PWM mode 2 peripherals
+  set QEI Timer
+  set 1000 Hz timer
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -53,19 +59,21 @@ TIM_HandleTypeDef htim5;
 
 /* USER CODE BEGIN PV */
 
-//For Read Real_position, set_point
+//For Read Real_positionM1, set_point
 uint16_t ADCBuffer[2];
 
 //PID
-arm_pid_instance_f32 PID = {0};
-float position =0;
-float setposition = 0;
+arm_pid_instance_f32 PID1 = {0};
+arm_pid_instance_f32 PID2 = {0};
+float positionM1 =0;
+float setpositionM1 = 0;
 float Vfeedback = 0;
+uint16_t positionM2 = 0;
 
 //For create PWM
 float duty_cycle = 0;
 
-//count round to unwrap position
+//count round to unwrap positionM1
 int n_round = 0;
 uint16_t old_ADC = 0;
 
@@ -88,7 +96,7 @@ static void MX_TIM5_Init(void);
 /* USER CODE BEGIN PFP */
 float PlantSimulation(float VIn) ;
 void PWM_Mode1();
-void Read_setpoint_position_Mode1();
+void Read_setpoint_positionM1_Mode1();
 
 //Received UART DMA
 void UARTDMAConfig();
@@ -135,15 +143,21 @@ int main(void)
   MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
 
-  //Read real_position, set_point with DMA
+  //Read real_positionM1, set_point with DMA
   HAL_ADC_Start_DMA(&hadc1, ADCBuffer, 2);
   HAL_TIM_Base_Start(&htim3);
 
   //PID Control
-  PID.Kp = 1.9;
-  PID.Ki = 0;
-  PID.Kd = 0;
-  arm_pid_init_f32(&PID, 0);
+  PID1.Kp = 1.9;
+  PID1.Ki = 0;
+  PID1.Kd = 0;
+  arm_pid_init_f32(&PID1, 0);
+
+  //PID Control
+  PID2.Kp = 1.9;
+  PID2.Ki = 0;
+  PID2.Kd = 0;
+  arm_pid_init_f32(&PID2, 0);
 
   //Output Compare for PWM Mode1
   HAL_TIM_Base_Start(&htim4);
@@ -164,26 +178,26 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  static uint32_t timestamp =0;
-	  if(timestamp < HAL_GetTick())
-	  {
-		  //Delay 0.01 s
-		  timestamp = HAL_GetTick()+10;
-
-		  if(mode == 1){ //motor control 12V
-			  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-			  Vfeedback = arm_pid_f32(&PID, setposition - position); //no more than 12V
-
-			  PWM_Mode1();
-			  Read_setpoint_position_Mode1();
-		  }
-		  else if(mode == 2){ //Fualhaber
-			  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-		  }
-		  else if(mode == 3){
-			  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-		  }
-
+	  if(mode == 1){ //motor control 12V
+		  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+		  VfeedbackM1 = arm_pid_f32(&PID1, setpositionM1 - positionM1); //no more than 12V
+		  duty_cycle = fabs(VfeedbackM1) * 100/12; //0->12V to 0->100%
+		  PWM_Mode1(duty_cycle);
+		  PWM_Mode2(0);
+	  }
+	  else if(mode == 2){ //Fualhaber
+		  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+		  VfeedbackM2 = arm_pid_f32(&PID2, setpositionM1 - positionM2); //no more than 12V
+		  duty_cycle = fabs(VfeedbackM2) * 100/12; //0->12V to 0->100%
+		  PWM_Mode1(0);
+		  PWM_Mode2(duty_cycle);
+	  }
+	  else if(mode == 3){
+		  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+	  }
+	  else if(mode == 4){
+		  //why are you here
+		  //test again
 	  }
   }
   /* USER CODE END 3 */
@@ -595,10 +609,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	}
 }
 
-void PWM_Mode1(){ //Motor Control
+void PWM_Mode1(uint16_t dut){ //Motor Control
 	//PWM to Motor Output Compare
-	duty_cycle = fabs(Vfeedback) * 100/12; //0->12V to 0->100%
-	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, (int)((duty_cycle * 1000) / 100));
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, (int)((dut * 1000) / 100));
 
 	if(Vfeedback >= 0){   //Motor Rotate Forward (CW) Radiant Increase
 		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
@@ -610,8 +623,22 @@ void PWM_Mode1(){ //Motor Control
 	}
 }
 
-void Read_setpoint_position_Mode1(){ //Motor Control
-	//Unwrap Position
+void PWM_Mode2(uint16_t dut){ //Motor Control
+	//PWM to Motor Output Compare
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, (int)((dut * 1000) / 100));
+
+	if(Vfeedback >= 0){   //Motor Rotate Forward (CW) Radiant Increase
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_RESET);
+	}
+	else{ //Motor Rotate Reverse Radiant decrease (CCW)
+		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10, GPIO_PIN_SET);
+	}
+}
+
+void Read_setpoint_positionM1_Mode1(){ //Motor Control
+	//Unwrap positionM1
 	if((old_ADC -  ADCBuffer[0])>2048){
 		n_round += 1;
 	}
@@ -620,8 +647,8 @@ void Read_setpoint_position_Mode1(){ //Motor Control
 	}
 	old_ADC = ADCBuffer[0];
 
-	setposition = ADCBuffer[1]*2*3.14/4095; //4095 -> rad
-	position = (ADCBuffer[0] + 4095*n_round)*2*3.14/4095; //4095 -> rad //feedback from potentionmeter
+	setpositionM1 = ADCBuffer[1]*2*3.14/4095; //4095 -> rad
+	positionM1 = (ADCBuffer[0] + 4095*n_round)*2*3.14/4095; //4095 -> rad //feedback from potentionmeter
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -646,6 +673,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		  // Transmit data over UART
 		  HAL_UART_Transmit(&hlpuart1, buffer, sizeof(buffer), 10);
 //		  HAL_UART_Transmit_DMA(&hlpuart1, TxBuffer, strlen((char*) TxBuffer));
+	}
+
+	if(htim == &htim2)
+	{
+		Read_setpoint_positionM1_Mode1();
+
+		QEIReadRaw = __HAL_TIM_GET_COUNTER(&htim3);
+		//spd =  QEIReadRaw * 1000 / 250 * 8; unused
+		positionM2 += QEIReadRaw;
+		__HAL_TIM_SET_COUNTER(&htim3, 0);
+		//VfeedbackM2 = (arm_pid_f32(&PID, set_pos - pos) * 1000);
 	}
 }
 
